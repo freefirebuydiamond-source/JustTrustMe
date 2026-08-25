@@ -1,53 +1,112 @@
-name: 3x-ui-Reality-Test
+name: V2Ray Server
 
 on:
   workflow_dispatch:
 
 jobs:
-  build:
+  run:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Start 3x-ui via Docker
+      # ===== الخلية الأولى: تحميل الأدوات =====
+      - name: Download Xray
         run: |
-          docker run -itd \
-            -e XRAY_VMESS_AEAD_FORCED=false \
-            -v $PWD/db/:/etc/xray-ui/ \
-            -v $PWD/cert/:/root/cert/ \
-            --network=host \
-            --restart=unless-stopped \
-            --name xray-ui \
-            ghcr.io/mhsanaei/3x-ui:latest
+          wget -qO xray.zip https://github.com/XTLS/Xray-core/releases/latest/download/Xray-linux-64.zip
+          sudo unzip -qo xray.zip -d /usr/local/bin/
+          sudo chmod +x /usr/local/bin/xray
+          rm -f xray.zip
 
-      - name: Setup Cloudflare Tunnel (For Web Panel)
+      - name: Download Cloudflared
         run: |
-          curl -L -o cloudflared.deb https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64.deb
-          sudo dpkg -i cloudflared.deb
-          cloudflared tunnel --url http://localhost:2053 > panel.log 2>&1 &
-          
-      - name: Setup Ngrok TCP Tunnel (For VLESS REALITY)
+          wget -q https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64 -O cloudflared
+          chmod +x cloudflared
+
+      - name: Install Python dependencies
+        run: pip install -q requests
+
+      # ===== الخلية الثانية: التشغيل + التحديث التلقائي =====
+      - name: Start V2Ray and update Cloudflare Worker
         env:
-          NGROK_TOKEN: ${{ secrets.NGROK_TOKEN }}
+          CLIENT_UUID: ${{ secrets.CLIENT_UUID }}
+          CF_ACCOUNT_ID: ${{ secrets.CF_ACCOUNT_ID }}
+          CF_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
         run: |
-          curl -s https://ngrok-agent.s3.amazonaws.com/ngrok.asc | sudo tee /etc/apt/trusted.gpg.d/ngrok.asc >/dev/null
-          echo "deb https://ngrok-agent.s3.amazonaws.com buster main" | sudo tee /etc/apt/sources.list.d/ngrok.list
-          sudo apt update && sudo apt install ngrok
-          
-          # سحب التوكن بأمان من قسم الـ Secrets
-          ngrok config add-authtoken "$NGROK_TOKEN"
-          
-          # فتح بورت 443 للاتصال
-          ngrok tcp 443 > ngrok.log 2>&1 &
-          
-      - name: Get Links and Wait
-        run: |
-          sleep 10
-          echo "=========================================="
-          echo "1. رابط لوحة التحكم (Cloudflare):"
-          grep -o 'https://[-0-9a-zA-Z.]*.trycloudflare.com' panel.log
-          echo "اليوزر: admin | الباسورد: admin"
-          echo "------------------------------------------"
-          echo "2. بيانات نفق الاتصال (Ngrok TCP):"
-          curl -s localhost:4040/api/tunnels | jq -r '.tunnels[0].public_url'
-          echo "=========================================="
-          sleep 3600
+          python3 << 'SCRIPT'
+          import os, subprocess, json, time, re
+
+          CLIENT_UUID = os.environ["CLIENT_UUID"]
+          PORT = 8080
+          CF_ACCOUNT_ID = os.environ.get("CF_ACCOUNT_ID", "")
+          CF_API_TOKEN = os.environ.get("CF_API_TOKEN", "")
+
+          # إنشاء ملف إعدادات Xray — loglevel = none عشان ما يطبع أي حاجة
+          config = {
+              "log": {"loglevel": "none"},
+              "inbounds": [{"port": PORT, "protocol": "vless",
+                  "settings": {"clients": [{"id": CLIENT_UUID}], "decryption": "none"},
+                  "streamSettings": {"network": "ws", "wsSettings": {"path": "/v2ray"}}}],
+              "outbounds": [{"protocol": "freedom"}]
+          }
+          with open("config.json", "w") as f:
+              json.dump(config, f)
+
+          # تشغيل Xray — كل الـ output يروح /dev/null
+          print("🚀 Starting...", flush=True)
+          xray_process = subprocess.Popen(
+              ["/usr/local/bin/xray", "run", "-config", "config.json"],
+              stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+          # تشغيل Cloudflare Tunnel — نقرأ الـ output مؤقتاً فقط لاستخراج الرابط
+          cf_process = subprocess.Popen(
+              ["./cloudflared", "tunnel", "--url", f"http://localhost:{PORT}"],
+              stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+
+          # استخراج رابط النفق
+          tunnel_url = ""
+          for _ in range(60):
+              line = cf_process.stdout.readline()
+              if not line:
+                  break
+              match = re.search(r'(https://[a-zA-Z0-9-]+\.trycloudflare\.com)', line)
+              if match:
+                  tunnel_url = match.group(1)
+                  break
+
+          if tunnel_url:
+              domain_only = tunnel_url.replace("https://", "")
+
+              # تحديث Cloudflare Worker تلقائياً
+              try:
+                  import requests
+                  WORKER_NAME = "vpn-proxy" # اسم الووركر الخاص بك
+                  url = f"https://api.cloudflare.com/client/v4/accounts/{CF_ACCOUNT_ID}/workers/scripts/{WORKER_NAME}/secrets"
+                  headers = {
+                      "Authorization": f"Bearer {CF_API_TOKEN}",
+                      "Content-Type": "application/json"
+                  }
+                  payload = {"name": "TARGET_URL", "text": domain_only, "type": "secret_text"}
+                  response = requests.put(url, headers=headers, json=payload)
+                  response.raise_for_status()
+                  print("✅ Cloudflare Worker Updated", flush=True)
+              except Exception as e:
+                  print(f"⚠️ Update failed: {e}", flush=True)
+          else:
+              print("❌ Failed", flush=True)
+              exit(1)
+
+          # تفريغ output الـ cloudflared في الخلفية بدون طباعة (عشان العملية ما تموتش)
+          import threading
+          def _drain(pipe):
+              for _ in pipe:
+                  pass
+          threading.Thread(target=_drain, args=(cf_process.stdout,), daemon=True).start()
+
+          # إبقاء العملية شغالة — بدون أي طباعة
+          try:
+              while True:
+                  time.sleep(60)
+          except KeyboardInterrupt:
+              xray_process.terminate()
+              cf_process.terminate()
+          SCRIPT
+
