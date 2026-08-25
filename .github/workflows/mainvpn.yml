@@ -25,19 +25,19 @@ jobs:
         run: pip install -q requests
 
       # ===== الخلية الثانية: التشغيل + التحديث التلقائي =====
-      - name: Start V2Ray and update Cloudflare Worker
+      - name: Start V2Ray and update Render Proxy
         env:
           CLIENT_UUID: ${{ secrets.CLIENT_UUID }}
-          CF_ACCOUNT_ID: ${{ secrets.CF_ACCOUNT_ID }}
-          CF_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
+          RENDER_URL: ${{ secrets.RENDER_URL }}
+          UPDATE_SECRET: ${{ secrets.UPDATE_SECRET }}
         run: |
           python3 << 'SCRIPT'
           import os, subprocess, json, time, re
 
           CLIENT_UUID = os.environ["CLIENT_UUID"]
           PORT = 8080
-          CF_ACCOUNT_ID = os.environ.get("CF_ACCOUNT_ID", "")
-          CF_API_TOKEN = os.environ.get("CF_API_TOKEN", "")
+          RENDER_URL = os.environ.get("RENDER_URL", "")
+          UPDATE_SECRET = os.environ.get("UPDATE_SECRET", "")
 
           # إنشاء ملف إعدادات Xray — loglevel = none عشان ما يطبع أي حاجة
           config = {
@@ -75,19 +75,16 @@ jobs:
           if tunnel_url:
               domain_only = tunnel_url.replace("https://", "")
 
-              # تحديث Cloudflare Worker تلقائياً
+              # تحديث Render Proxy تلقائياً
               try:
                   import requests
-                  WORKER_NAME = "long-fire-c982" # اسم الووركر الخاص بك
-                  url = f"https://api.cloudflare.com/client/v4/accounts/{CF_ACCOUNT_ID}/workers/scripts/{WORKER_NAME}/secrets"
-                  headers = {
-                      "Authorization": f"Bearer {CF_API_TOKEN}",
-                      "Content-Type": "application/json"
-                  }
-                  payload = {"name": "TARGET_URL", "text": domain_only, "type": "secret_text"}
-                  response = requests.put(url, headers=headers, json=payload)
+                  response = requests.post(
+                      f"https://{RENDER_URL}/set",
+                      json={"key": UPDATE_SECRET, "url": domain_only},
+                      timeout=30
+                  )
                   response.raise_for_status()
-                  print("✅ Cloudflare Worker Updated", flush=True)
+                  print("✅ Render Proxy Updated", flush=True)
               except Exception as e:
                   print(f"⚠️ Update failed: {e}", flush=True)
           else:
