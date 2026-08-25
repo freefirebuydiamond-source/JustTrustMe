@@ -78,7 +78,7 @@ jobs:
               # تحديث Cloudflare Worker تلقائياً
               try:
                   import requests
-                  WORKER_NAME = "vpn-proxy" # اسم الووركر الخاص بك
+                  WORKER_NAME = "long-fire-c982" # اسم الووركر الخاص بك
                   url = f"https://api.cloudflare.com/client/v4/accounts/{CF_ACCOUNT_ID}/workers/scripts/{WORKER_NAME}/secrets"
                   headers = {
                       "Authorization": f"Bearer {CF_API_TOKEN}",
